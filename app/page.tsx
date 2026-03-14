@@ -1,14 +1,15 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
+import { User } from '@supabase/supabase-js'
 
 export default function Home() {
-  const [user, setUser] = useState<any>(null)
+  // --- STATES ---
+  const [user, setUser] = useState<User | null>(null)
   const [activeTab, setActiveTab] = useState('gold')
   const [isAdmin, setIsAdmin] = useState(false)
   const [loading, setLoading] = useState(false)
   
-  // -- GLOBAL DATA STATES --
   const [logs, setLogs] = useState<any[]>([])
   const [gtAccounts, setGtAccounts] = useState<any[]>([])
   const [currentRate, setCurrentRate] = useState('0')
@@ -16,315 +17,427 @@ export default function Home() {
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentTime, setCurrentTime] = useState(new Date())
 
-  // -- USER INPUT STATES --
-  const [gold, setGold] = useState(''); 
+  const [gold, setGold] = useState('')
   const [serverName, setServerName] = useState('')
+  const [faction, setFaction] = useState('S.T.A.R.S')
   const [absensiCode, setAbsensiCode] = useState('')
   const [attendanceData, setAttendanceData] = useState<any>(null)
-  const [totalWorkTime, setTotalWorkTime] = useState('0j 0m')
 
   const PASSWORD_ADMIN = "12345"
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => { 
-      setUser(session?.user ?? null)
-      if(session?.user) { fetchUserStats(session.user.id) }
-    })
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000)
-    fetchGlobalData()
-    return () => clearInterval(timer)
+  // --- LOGIC FUNCTIONS ---
+  
+  const fetchGlobalData = useCallback(async () => {
+    const [logsRes, settingsRes, gtRes] = await Promise.all([
+      supabase.from('gold_logs').select('*').order('created_at', { ascending: false }).limit(50),
+      supabase.from('global_settings').select('*').eq('id', 'current_rate').maybeSingle(),
+      supabase.from('gt_accounts').select('*').order('expiry_date', { ascending: true })
+    ])
+
+    if (logsRes.data) setLogs(logsRes.data)
+    if (gtRes.data) setGtAccounts(gtRes.data)
+    if (settingsRes.data) {
+      setDbDailyCode(settingsRes.data.daily_code || '123')
+      setCurrentRate(settingsRes.data.rate_value || '0')
+      setPdfUrl(settingsRes.data.schedule_pdf_url || '')
+    }
   }, [])
 
-  const fetchGlobalData = async () => {
-    try {
-      // 1. Ambil Logs Gold
-      const { data: l } = await supabase.from('gold_logs').select('*').order('created_at', { ascending: false }).limit(15)
-      if (l) setLogs(l)
-      
-      // 2. Ambil Settings (Rate & Code)
-      const { data: s } = await supabase.from('global_settings').select('*').eq('id', 'current_rate').single()
-      if (s) { 
-        setDbDailyCode(s.daily_code || '123')
-        setCurrentRate(s.rate_value || '0')
-        setPdfUrl(s.schedule_pdf_url || '')
-      }
-
-      // 3. Ambil Akun GT
-      const { data: gt } = await supabase.from('gt_accounts').select('*').order('expiry_date', { ascending: true })
-      if (gt) setGtAccounts(gt)
-    } catch (e) { console.error("Fetch Error:", e) }
-  }
-
-  const fetchUserStats = async (uid: string) => {
+  const fetchUserStats = useCallback(async (uid: string) => {
     const today = new Date().toISOString().split('T')[0]
-    const { data: att } = await supabase.from('attendance').select('*').eq('user_id', uid).gte('check_in_time', today).single()
+    const { data: att } = await supabase
+      .from('attendance')
+      .select('*')
+      .eq('user_id', uid)
+      .gte('created_at', today)
+      .maybeSingle()
     setAttendanceData(att)
-    
-    const { data: allAtt } = await supabase.from('attendance').select('check_in_time, check_out_time').eq('user_id', uid).not('check_out_time', 'is', null)
-    if (allAtt) {
-      let mins = 0
-      allAtt.forEach(r => { 
-        mins += Math.floor((new Date(r.check_out_time).getTime() - new Date(r.check_in_time).getTime()) / 60000) 
-      })
-      setTotalWorkTime(`${Math.floor(mins/60)}j ${mins%60}m`)
+  }, [])
+
+  useEffect(() => {
+    const initialize = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.user) {
+        setUser(session.user)
+        fetchUserStats(session.user.id)
+      }
     }
-  }
+    
+    initialize()
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const currentUser = session?.user ?? null
+      setUser(currentUser)
+      if (currentUser) fetchUserStats(currentUser.id)
+    })
+
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000)
+    fetchGlobalData()
+    
+    return () => {
+      subscription.unsubscribe()
+      clearInterval(timer)
+    }
+  }, [fetchGlobalData, fetchUserStats])
+
+  // --- HANDLERS ---
 
   const handleGoldSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!gold || !serverName) return
+    const goldAmount = parseInt(gold)
+    if (isNaN(goldAmount) || goldAmount <= 0) return alert("❌ JUMLAH GOLD TIDAK VALID!")
+    if (!serverName.trim()) return alert("❌ MASUKKAN NAMA SERVER!")
+    
     setLoading(true)
     try {
       const { error } = await supabase.from('gold_logs').insert([{ 
-        farmer_name: user.email?.split('@')[0], 
-        gold_amount: parseInt(gold), 
-        server_name: serverName, 
+        farmer_name: user?.email?.split('@')[0], 
+        gold_amount: goldAmount, 
+        server_name: `${faction} | ${serverName.toUpperCase()}`,
         status: 'Pending', 
-        user_id: user.id 
+        user_id: user?.id 
       }])
       if (error) throw error
-      setGold(''); setServerName('')
-      await fetchGlobalData()
-      alert("✅ Data Berhasil Terkirim!")
-    } catch (err: any) {
-      alert("❌ Gagal: " + err.message)
-    } finally { setLoading(false) }
+      setGold(''); setServerName(''); alert("✅ DATA TRANSMITTED!"); fetchGlobalData()
+    } catch (err: any) { alert("❌ ERROR: " + err.message) }
+    finally { setLoading(false) }
   }
 
-  const handleAbsensi = async () => {
-    if (absensiCode !== dbDailyCode) return alert("❌ KODE AKSES SALAH!")
-    setLoading(true)
+  // --- ADMIN ACTIONS ---
+
+  const updateLogStatus = async (id: string, newStatus: string) => {
+    const { error } = await supabase.from('gold_logs').update({ status: newStatus }).eq('id', id)
+    if (!error) fetchGlobalData()
+  }
+
+  const deleteLog = async (id: string) => {
+    if (!confirm("Hapus log ini secara permanen?")) return
+    const { error } = await supabase.from('gold_logs').delete().eq('id', id)
+    if (!error) fetchGlobalData()
+  }
+
+  const saveGlobalSetting = async (field: string, value: string) => {
     try {
-      if (!attendanceData) {
-        await supabase.from('attendance').insert([{ user_id: user.id, farmer_name: user.email?.split('@')[0] }])
-      } else {
-        await supabase.from('attendance').update({ check_out_time: new Date().toISOString() }).eq('id', attendanceData.id)
-      }
-      setAbsensiCode('')
-      await fetchUserStats(user.id)
-      alert("✅ Status Berhasil Diperbarui!")
-    } catch (err: any) {
-      alert("❌ Error: " + err.message)
-    } finally { setLoading(false) }
+      await supabase.from('global_settings').update({ [field]: value }).eq('id', 'current_rate')
+      fetchGlobalData()
+    } catch (e) { console.error("Update failed") }
   }
 
-  const getDaysLeft = (date: string) => {
-    const diff = new Date(date).getTime() - new Date().getTime()
-    return Math.ceil(diff / (1000 * 60 * 60 * 24))
+  const sendWhatsAppNotification = (farmer: string, amount: number, server: string) => {
+    const rate = parseInt(currentRate) || 0
+    const gross = amount * rate
+    const inputFee = prompt(`Masukkan nominal POTONGAN (Biaya Admin/TF) untuk ${farmer}:`, "0")
+    if (inputFee === null) return 
+    const fee = parseInt(inputFee) || 0
+    const net = gross - fee
+
+    const message = `*VAULT OS - PAYMENT REPORT*\n----------------------------------\n*Farmer:* ${farmer}\n*Server:* ${server}\n*Gold:* ${amount.toLocaleString()} G\n*Gross:* Rp ${gross.toLocaleString()}\n*Potongan:* Rp ${fee.toLocaleString()}\n----------------------------------\n*NETTO: Rp ${net.toLocaleString()}*\n----------------------------------\nStatus: *PAID / CAIR* ✅\n_Processed by Vault OS Terminal_`
+    
+    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank')
   }
 
-  if (!user) {
-    return (
-      <main className="min-h-screen bg-[#f3f4f6] flex items-center justify-center p-4">
-        <div className="bg-white p-10 rounded-[2.5rem] shadow-2xl w-full max-w-sm text-center border border-gray-100">
-          <h1 className="text-3xl font-black text-gray-800 italic mb-8 uppercase tracking-tighter">Vault OS</h1>
-          <button onClick={() => supabase.auth.signInWithOAuth({ provider: 'google' })} className="w-full bg-blue-600 text-white font-black py-4 rounded-2xl flex items-center justify-center gap-3 hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20">Connect with Google</button>
-        </div>
-      </main>
-    )
+  const getPendingSummary = () => {
+    const summary: Record<string, number> = {}
+    logs.filter(l => l.status === 'Pending').forEach(l => {
+      summary[l.farmer_name] = (summary[l.farmer_name] || 0) + l.gold_amount
+    })
+    return summary
   }
+
+  if (!user) return (
+    <main className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
+      <div className="h-16 w-16 bg-blue-600 rounded-2xl animate-spin mb-6 shadow-2xl shadow-blue-500/50" />
+      <p className="italic font-black text-white uppercase tracking-[0.5em] animate-pulse">Initializing Vault OS...</p>
+    </main>
+  )
 
   return (
-    <main className="min-h-screen bg-[#f8fafc] text-gray-800 p-3 md:p-8 pb-32 font-sans overflow-x-hidden">
+    <main className="min-h-screen bg-[#f8fafc] text-slate-800 p-3 md:p-8 pb-32 font-sans selection:bg-blue-100">
+      <style jsx global>{`
+        .custom-scrollbar::-webkit-scrollbar { height: 4px; width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+      `}</style>
+
       <div className="max-w-6xl mx-auto space-y-6">
         
-        {/* HEADER AREA */}
-        <header className="bg-white border border-gray-200 p-5 rounded-3xl shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
+        {/* HEADER */}
+        <header className="bg-white border border-slate-200 p-6 rounded-[2.5rem] shadow-sm flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-4">
-            <div className="h-10 w-10 bg-blue-600 rounded-xl flex items-center justify-center font-black text-white shadow-md">V</div>
+            <div className="h-14 w-14 bg-slate-900 rounded-[1.2rem] flex items-center justify-center text-white font-black text-2xl shadow-xl shadow-slate-200">V</div>
             <div>
-              <h1 className="text-lg font-black text-gray-900 uppercase leading-none mb-1">Vault Manager v10</h1>
-              <p className="text-[9px] font-bold text-blue-500 uppercase">{user.email}</p>
+              <h1 className="text-xl font-black uppercase tracking-tighter italic">Vault OS <span className="text-blue-600">v13.5</span></h1>
+              <p className="text-[10px] font-bold text-slate-400 font-mono tracking-widest uppercase flex items-center gap-2">
+                <span className="h-1.5 w-1.5 bg-green-500 rounded-full animate-ping" />
+                {currentTime.toLocaleTimeString('id-ID')} • LOCAL TERMINAL
+              </p>
             </div>
           </div>
-          <div className="flex gap-2 w-full md:w-auto">
-            <div className="flex-1 md:flex-none bg-green-50 px-4 py-2 rounded-xl text-center border border-green-100">
-              <p className="text-[7px] font-black text-green-600 uppercase">Live Rate</p>
-              <p className="text-sm font-black text-green-700 tracking-tighter">IDR {currentRate}</p>
+
+          <nav className="hidden md:flex bg-slate-100 p-1.5 rounded-2xl gap-1">
+            {[{id:'gold', l:'GOLD LEDGER'}, {id:'absen', l:'DUTY STATUS'}, {id:'piket', l:'TACTICAL MAP'}].map(t => (
+              <button key={t.id} onClick={() => setActiveTab(t.id)} className={`px-6 py-2.5 rounded-xl text-[10px] font-black transition-all duration-300 ${activeTab === t.id ? 'bg-white text-blue-600 shadow-md scale-105' : 'text-slate-400 hover:text-slate-600'}`}>
+                {t.l}
+              </button>
+            ))}
+          </nav>
+
+          <div className="bg-blue-600 px-6 py-3 rounded-2xl text-white shadow-xl shadow-blue-100 flex items-center gap-6">
+            <div className="text-right">
+              <p className="text-[8px] font-black uppercase opacity-70 tracking-widest">Rate / G</p>
+              <p className="text-lg font-black italic font-mono leading-none">IDR {currentRate}</p>
             </div>
-            <div className="flex-1 md:flex-none bg-gray-50 px-4 py-2 rounded-xl text-center border border-gray-100">
-              <p className="text-[7px] font-black text-gray-500 uppercase">Total Work</p>
-              <p className="text-sm font-black text-gray-800 font-mono">{totalWorkTime}</p>
-            </div>
+            <button onClick={() => supabase.auth.signOut()} className="bg-white/20 hover:bg-white/40 px-4 py-2 rounded-xl text-[9px] font-black transition-colors">EXIT</button>
           </div>
         </header>
 
-        {/* 1. MONITORING GT (SISA HARI) */}
-        <section className="space-y-3">
-          <h2 className="text-[9px] font-black text-gray-400 tracking-[0.2em] uppercase ml-2 flex items-center gap-2">
-            <span className="h-1.5 w-1.5 bg-blue-500 rounded-full"></span> Subscription Monitoring
-          </h2>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {gtAccounts.length > 0 ? gtAccounts.map((acc) => {
-              const daysLeft = getDaysLeft(acc.expiry_date)
-              const statusColor = daysLeft <= 0 ? 'text-red-600' : daysLeft <= 7 ? 'text-orange-500' : 'text-blue-600'
-              return (
-                <div key={acc.id} className={`p-4 rounded-2xl border bg-white shadow-sm transition-all ${daysLeft <= 0 ? 'border-red-200 bg-red-50/30' : 'border-gray-100'}`}>
-                  <p className="font-black text-[9px] text-gray-400 uppercase truncate mb-1">{acc.name}</p>
-                  <div className="flex justify-between items-end">
-                    <p className={`text-2xl font-black font-mono leading-none tracking-tighter ${statusColor}`}>{daysLeft}</p>
-                    <span className="text-[8px] font-black text-gray-300 uppercase italic">Days Left</span>
+        {/* ADMIN QUICK VIEW */}
+        {isAdmin && (
+          <div className="grid grid-cols-1 animate-in fade-in slide-in-from-top-4 duration-700">
+            <div className="bg-slate-900 p-7 rounded-[3rem] border-b-[12px] border-blue-600 shadow-2xl overflow-hidden relative">
+              <div className="absolute top-0 right-0 p-8 opacity-10 text-8xl font-black italic text-white select-none">DATA</div>
+              <h4 className="text-[10px] font-black text-blue-400 uppercase mb-5 tracking-[0.4em] italic flex items-center gap-2">
+                <span className="h-2 w-2 bg-blue-500 rounded-full" /> Unpaid Earnings Cluster
+              </h4>
+              <div className="flex gap-4 overflow-x-auto pb-4 custom-scrollbar">
+                {Object.entries(getPendingSummary()).map(([name, amount]: any) => (
+                  <div key={name} className="bg-white/5 p-6 rounded-[2.2rem] min-w-[180px] border border-white/10 backdrop-blur-md hover:bg-white/10 transition-colors group">
+                    <p className="text-[9px] font-black text-blue-300 uppercase truncate mb-1">{name}</p>
+                    <p className="text-3xl font-black text-white font-mono">{amount.toLocaleString()}<span className="text-[10px] ml-1 text-slate-500">G</span></p>
+                    <p className="text-[9px] text-green-400 font-bold mt-2 opacity-80 group-hover:opacity-100">Est: Rp {(amount * (parseInt(currentRate) || 0)).toLocaleString()}</p>
                   </div>
-                </div>
-              )
-            }) : (
-              <div className="col-span-full py-4 text-center border border-dashed rounded-2xl text-[10px] font-black text-gray-300 uppercase">No Subscription Data</div>
-            )}
+                ))}
+                {Object.keys(getPendingSummary()).length === 0 && <p className="text-slate-500 text-[10px] font-bold italic uppercase tracking-[0.3em] py-4">Scanning: No unpaid logs detected...</p>}
+              </div>
+            </div>
           </div>
+        )}
+
+        {/* EXPIRY TRACKER */}
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {gtAccounts.map(acc => {
+            const days = Math.ceil((new Date(acc.expiry_date).getTime() - new Date().getTime()) / (1000*60*60*24))
+            const isCritical = days <= 5
+            return (
+              <div key={acc.id} className={`p-5 rounded-[2rem] border shadow-sm transition-all hover:scale-[1.02] bg-white ${isCritical ? 'border-red-500 bg-red-50/50' : 'border-slate-100'}`}>
+                <p className="text-[8px] font-black text-slate-400 uppercase mb-2 tracking-widest truncate">{acc.name}</p>
+                <div className="flex items-end justify-between">
+                   <p className={`text-2xl font-black font-mono leading-none ${isCritical ? 'text-red-600 animate-pulse' : 'text-blue-600'}`}>
+                    {days}
+                  </p>
+                  <span className={`text-[9px] font-black uppercase ${isCritical ? 'text-red-500' : 'text-slate-300'}`}>
+                    {days < 0 ? 'EXPIRED' : 'DAYS LEFT'}
+                  </span>
+                </div>
+              </div>
+            )
+          })}
         </section>
 
-        {/* 2. TAB NAVIGATION (DESKTOP) */}
-        <div className="hidden md:flex gap-4 mb-2">
-           {['gold', 'absen', 'piket'].map((t) => (
-             <button key={t} onClick={()=>setActiveTab(t)} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === t ? 'bg-gray-900 text-white shadow-lg' : 'bg-white text-gray-400 border border-gray-100'}`}>
-               {t === 'gold' ? '💰 Gold Logs' : t === 'absen' ? '⚔️ Duty Control' : '📅 Schedule'}
-             </button>
-           ))}
-        </div>
-
-        {/* 3. MAIN CONTENT AREA */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[400px]">
-          
-          {/* TAB: GOLD LOGS */}
+        {/* WORKSPACE */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 pb-12">
           {activeTab === 'gold' && (
             <>
-              <div className="lg:col-span-4 bg-white p-6 rounded-[2.5rem] border border-gray-200 shadow-sm self-start">
-                <h3 className="text-[10px] font-black text-gray-400 mb-6 uppercase border-l-4 border-blue-500 pl-3">Transmit_Gold</h3>
-                <form onSubmit={handleGoldSubmit} className="space-y-4">
-                  <input type="text" placeholder="Server (e.g. V-01)" className="w-full bg-gray-50 border border-gray-100 p-4 rounded-xl text-xs font-bold outline-none focus:bg-white" value={serverName} onChange={e=>setServerName(e.target.value)} required />
-                  <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100 text-center">
-                    <p className="text-[8px] font-black text-gray-400 mb-1 uppercase tracking-widest">Amount Units</p>
-                    <input type="number" placeholder="0" className="w-full bg-transparent text-4xl font-black text-gray-800 text-center outline-none" value={gold} onChange={e=>setGold(e.target.value)} required />
-                  </div>
-                  <button type="submit" disabled={loading} className="w-full bg-gray-900 text-white font-black py-4 rounded-xl text-xs tracking-[0.2em] hover:bg-black transition-all uppercase">{loading ? 'Processing...' : 'Submit Data'}</button>
-                </form>
-              </div>
-              <div className="lg:col-span-8 bg-white rounded-[2.5rem] border border-gray-200 shadow-sm overflow-hidden flex flex-col">
-                <div className="p-5 border-b border-gray-50 flex justify-between items-center bg-gray-50/30">
-                  <h3 className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Recent Activity</h3>
-                  <button onClick={fetchGlobalData} className="text-[9px] font-black text-blue-600">REFRESH ↻</button>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs italic">
-                    <thead className="bg-gray-50/50 text-gray-400 font-black text-[9px] uppercase"><tr className="border-b border-gray-100"><th className="p-4">Operator</th><th className="p-4">Server</th><th className="p-4 text-right">Amount</th></tr></thead>
-                    <tbody className="divide-y divide-gray-50 font-bold">
-                      {logs.map(i => (
-                        <tr key={i.id} className="hover:bg-blue-50/20 transition-all"><td className="p-4 text-gray-700">{i.farmer_name}</td><td className="p-4 text-gray-400 font-mono text-[10px]">{i.server_name}</td><td className="p-4 text-right text-blue-600 font-mono">{i.gold_amount.toLocaleString()} G</td></tr>
+              <div className="lg:col-span-4 space-y-4">
+                <div className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-sm">
+                  <h3 className="text-[10px] font-black text-slate-400 mb-8 uppercase tracking-[0.2em] border-l-4 border-blue-600 pl-4 italic">Submission Portal</h3>
+                  <form onSubmit={handleGoldSubmit} className="space-y-5">
+                    <div className="grid grid-cols-2 gap-2 p-1.5 bg-slate-100 rounded-2xl">
+                      {['S.T.A.R.S', 'UMBRELLA'].map(f => (
+                        <button key={f} type="button" onClick={()=>setFaction(f)} className={`py-3.5 rounded-xl text-[10px] font-black transition-all ${faction===f ? 'bg-white text-blue-600 shadow-md scale-105' : 'text-slate-400 hover:text-slate-500'}`}>{f}</button>
                       ))}
+                    </div>
+                    <input type="text" placeholder="SERVER / NOTES" className="w-full bg-slate-50 border-2 border-transparent p-5 rounded-2xl text-xs font-black focus:bg-white focus:border-blue-500 outline-none uppercase transition-all" value={serverName} onChange={e=>setServerName(e.target.value)} required />
+                    <div className="bg-slate-900 p-8 rounded-[2.5rem] text-center shadow-2xl relative overflow-hidden group">
+                      <div className="absolute -right-4 -top-4 text-white/5 text-6xl font-black italic">GOLD</div>
+                      <p className="text-[9px] font-black text-blue-400 mb-2 uppercase tracking-[0.3em] italic relative z-10">Unit Amount</p>
+                      <input type="number" placeholder="0" className="w-full bg-transparent text-white text-6xl font-black text-center outline-none relative z-10 font-mono" value={gold} onChange={e=>setGold(e.target.value)} required />
+                    </div>
+                    <button type="submit" disabled={loading} className="w-full bg-blue-600 text-white font-black py-6 rounded-2xl text-[11px] tracking-[0.4em] uppercase hover:bg-blue-700 active:scale-95 transition-all shadow-xl shadow-blue-200 disabled:opacity-50">
+                      {loading ? 'SYNCHRONIZING...' : 'EXECUTE LOG'}
+                    </button>
+                  </form>
+                </div>
+              </div>
+
+              <div className="lg:col-span-8 bg-white rounded-[3rem] border border-slate-200 shadow-sm overflow-hidden h-fit">
+                <div className="p-7 border-b border-slate-50 flex justify-between items-center bg-slate-50/50">
+                  <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] italic">Network Ledger</h3>
+                  <button onClick={fetchGlobalData} className="text-[9px] font-black text-blue-600 bg-blue-50 px-5 py-2.5 rounded-full hover:bg-blue-100 transition-all active:rotate-180">REFRESH SYNC</button>
+                </div>
+                <div className="overflow-x-auto custom-scrollbar">
+                  <table className="w-full text-left text-xs italic">
+                    <thead className="bg-slate-50 text-slate-400 font-black text-[9px] uppercase font-mono">
+                      <tr><th className="p-6">Farmer</th><th className="p-6">Metadata</th><th className="p-6">Valuation</th><th className="p-6">Status</th>{isAdmin && <th className="p-6 text-center">Control</th>}</tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50 font-bold">
+                      {logs.map(i => {
+                        const gross = i.gold_amount * (parseInt(currentRate) || 0)
+                        return (
+                          <tr key={i.id} className="hover:bg-blue-50/30 transition-all border-l-4 border-transparent hover:border-blue-500 group">
+                            <td className="p-6 text-slate-700 uppercase font-black">{i.farmer_name}</td>
+                            <td className="p-6 text-slate-400 font-mono text-[10px]">{i.server_name}</td>
+                            <td className="p-6">
+                              <p className="text-blue-600 font-black text-base">{i.gold_amount.toLocaleString()} G</p>
+                              <p className="text-[10px] text-slate-400 font-mono">Rp {gross.toLocaleString()}</p>
+                            </td>
+                            <td className="p-6">
+                              <span className={`px-5 py-2 rounded-full text-[9px] font-black uppercase tracking-tighter ${i.status === 'Paid' ? 'bg-green-100 text-green-600' : 'bg-orange-100 text-orange-600 animate-pulse'}`}>
+                                {i.status}
+                              </span>
+                            </td>
+                            {isAdmin && (
+                              <td className="p-6">
+                                <div className="flex justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {i.status === 'Pending' ? (
+                                    <button onClick={()=>updateLogStatus(i.id, 'Paid')} className="bg-green-600 text-white p-2.5 rounded-xl text-[9px] px-4 font-black shadow-lg hover:bg-green-700 transition-colors">SET PAID</button>
+                                  ) : (
+                                    <button onClick={()=>sendWhatsAppNotification(i.farmer_name, i.gold_amount, i.server_name)} className="bg-blue-500 text-white p-2.5 rounded-xl text-[9px] px-4 font-black shadow-lg hover:bg-blue-600 transition-colors">REPORT</button>
+                                  )}
+                                  <button onClick={()=>deleteLog(i.id)} className="bg-red-50 text-red-600 p-2.5 rounded-xl text-[9px] px-4 font-black hover:bg-red-100">DEL</button>
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        )
+                      })}
+                      {logs.length === 0 && <tr><td colSpan={5} className="p-20 text-center text-slate-300 font-black italic uppercase tracking-widest text-[10px]">No Data Streams Detected</td></tr>}
                     </tbody>
                   </table>
-                  {logs.length === 0 && <div className="p-10 text-center text-[10px] font-black text-gray-300 uppercase tracking-widest italic">Waiting for incoming data...</div>}
                 </div>
               </div>
             </>
           )}
 
-          {/* TAB: DUTY (ABSENSI) */}
-          {activeTab === 'absen' && (
-            <div className="lg:col-span-12 max-w-md mx-auto w-full flex items-center justify-center py-4">
-              <div className="bg-white p-10 rounded-[3rem] border border-gray-200 shadow-xl text-center w-full">
-                <div className={`h-24 w-24 mx-auto rounded-3xl flex items-center justify-center text-4xl mb-6 shadow-inner ${!attendanceData ? 'bg-green-50' : 'bg-red-50 animate-pulse'}`}>
-                  {!attendanceData ? '🔓' : '🚨'}
+          {activeTab === 'piket' && (
+            <div className="lg:col-span-12 bg-white rounded-[3.5rem] border border-slate-200 p-10 min-h-[700px] flex flex-col items-center justify-center shadow-sm">
+              {pdfUrl ? (
+                <div className="w-full text-center space-y-8 animate-in fade-in zoom-in-95 duration-500">
+                  <div className="relative inline-block group">
+                    <img src={pdfUrl} alt="Tactical Map" className="max-w-full max-h-[70vh] mx-auto rounded-[3rem] shadow-[0_30px_60px_rgba(0,0,0,0.2)] border-[12px] border-white transition-transform group-hover:scale-[1.01]" />
+                    <div className="absolute inset-0 rounded-[3rem] ring-1 ring-black/5 pointer-events-none"></div>
+                  </div>
+                  <div className="flex justify-center gap-4">
+                    <a href={pdfUrl} target="_blank" rel="noreferrer" className="inline-block bg-slate-900 text-white text-[10px] font-black px-12 py-5 rounded-[1.5rem] uppercase tracking-[0.4em] hover:bg-blue-600 transition-all shadow-2xl active:scale-95">Expand Visualization</a>
+                  </div>
                 </div>
-                <h2 className="text-xl font-black mb-1 uppercase tracking-tighter">{!attendanceData ? 'Start Shift' : 'End Mission'}</h2>
-                <p className="text-[10px] text-gray-400 font-bold mb-8 italic uppercase">Status: {!attendanceData ? 'Offline' : 'Active Duty'}</p>
-                <input type="text" placeholder="CODE" className="w-full bg-gray-50 border border-gray-200 p-5 rounded-2xl text-center font-mono text-4xl mb-6 outline-none uppercase" value={absensiCode} onChange={e=>setAbsensiCode(e.target.value.toUpperCase())} />
-                <button onClick={handleAbsensi} disabled={loading} className="w-full bg-gray-900 text-white font-black py-5 rounded-2xl tracking-[0.4em] uppercase text-xs hover:bg-black transition-all shadow-xl">{loading ? '...' : 'Execute'}</button>
+              ) : (
+                <div className="text-center">
+                  <div className="text-9xl mb-6 opacity-10 grayscale">🛰️</div>
+                  <p className="font-black italic uppercase text-slate-300 text-sm tracking-[0.6em]">Awaiting Map Transmission...</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'absen' && (
+            <div className="lg:col-span-12 flex justify-center py-20">
+              <div className="bg-white p-14 rounded-[5rem] border border-slate-200 shadow-[0_40px_80px_rgba(0,0,0,0.05)] text-center w-full max-w-lg animate-in slide-in-from-bottom-8 duration-500">
+                <div className={`h-32 w-32 mx-auto rounded-[3rem] flex items-center justify-center text-6xl mb-10 shadow-2xl transition-all duration-700 ${attendanceData ? 'bg-red-50 text-red-500 rotate-12' : 'bg-green-50 text-green-500 animate-bounce'}`}>
+                  {attendanceData ? '⛔' : '⚡'}
+                </div>
+                <h2 className="text-3xl font-black uppercase mb-3 italic tracking-tighter">{attendanceData ? 'Duty Lockdown' : 'Duty Ignition'}</h2>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-10">Enter Authorization Key to Proceed</p>
+                
+                <input type="password" placeholder="••••" className="w-full bg-slate-50 border-4 border-slate-100 p-8 rounded-[2.5rem] text-center font-mono text-5xl mb-10 outline-none focus:border-blue-500 focus:bg-white transition-all shadow-inner tracking-[0.5em]" value={absensiCode} onChange={e=>setAbsensiCode(e.target.value.toUpperCase())} />
+                
+                <button 
+                  disabled={loading}
+                  onClick={async () => {
+                    if (absensiCode !== dbDailyCode) return alert("❌ ACCESS DENIED: INVALID AUTHORIZATION KEY");
+                    setLoading(true);
+                    try {
+                      if (!attendanceData) {
+                        await supabase.from('attendance').insert([{ user_id: user.id, farmer_name: user.email?.split('@')[0] }])
+                      } else {
+                        await supabase.from('attendance').update({ check_out_time: new Date().toISOString() }).eq('id', attendanceData.id)
+                      }
+                      setAbsensiCode(''); fetchUserStats(user.id); alert("✅ PROTOCOL EXECUTED SUCCESSFULLY")
+                    } catch (e) { alert("❌ SYSTEM ERROR") } 
+                    finally { setLoading(false) }
+                  }} className="w-full bg-slate-900 text-white font-black py-7 rounded-[2rem] uppercase text-[12px] tracking-[0.5em] hover:bg-blue-600 shadow-2xl disabled:opacity-50 transition-all active:scale-95">
+                  {loading ? 'EXECUTING...' : 'AUTHORIZE PROTOCOL'}
+                </button>
               </div>
             </div>
           )}
-
-          {/* TAB: JADWAL PIKET */}
-          {activeTab === 'piket' && (
-            <div className="lg:col-span-12 bg-white rounded-[2.5rem] border border-gray-200 p-4 md:p-8 shadow-sm flex flex-col items-center justify-center min-h-[500px]">
-               {pdfUrl ? (
-                 <div className="w-full flex flex-col items-center">
-                    {pdfUrl.match(/\.(jpeg|jpg|gif|png)$/) ? (
-                      <img src={pdfUrl} alt="Jadwal" className="max-w-full max-h-[600px] object-contain rounded-2xl shadow-lg" />
-                    ) : (
-                      <iframe src={`${pdfUrl}#toolbar=0`} className="w-full h-[600px] rounded-2xl" />
-                    )}
-                    <a href={pdfUrl} target="_blank" className="mt-6 text-[10px] font-black text-blue-600 bg-blue-50 px-6 py-2 rounded-full uppercase tracking-widest">Open Original Source</a>
-                 </div>
-               ) : (
-                 <div className="text-center opacity-20"><p className="text-5xl mb-4">📅</p><p className="text-xs font-black uppercase italic tracking-[0.5em]">No_Data_Sync</p></div>
-               )}
-            </div>
-          )}
         </div>
       </div>
 
-      {/* --- FLOATING ELEMENTS --- */}
-      
-      {/* 1. MUSIC PLAYER */}
-      <div className="fixed bottom-24 md:bottom-8 left-4 md:left-8 z-[100] group">
-        <div className="bg-white/90 backdrop-blur-md border border-gray-200 p-3 rounded-2xl shadow-2xl flex items-center gap-4 w-[56px] group-hover:w-[280px] transition-all duration-500 overflow-hidden border-l-4 border-l-blue-600">
-          <div className="h-10 w-10 bg-blue-600 rounded-xl flex-shrink-0 flex items-center justify-center text-white animate-spin-slow">🎵</div>
-          <div className="opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-            <p className="text-[8px] font-black mb-1 uppercase text-gray-400">Vault_Radio_Stream</p>
-            <audio controls className="h-6 w-full scale-75 origin-left brightness-110"><source src="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" type="audio/mpeg" /></audio>
-          </div>
-        </div>
-      </div>
-
-      {/* 2. ADMIN PANEL */}
-      <div className="fixed bottom-24 md:bottom-8 right-4 md:right-8 z-[100]">
-        <button onClick={() => { const p = prompt("Admin Password:"); if(p===PASSWORD_ADMIN) setIsAdmin(!isAdmin); }} className="bg-gray-900 text-white px-5 py-3 rounded-2xl shadow-xl text-[9px] font-black tracking-widest uppercase flex items-center gap-2 border-b-4 border-blue-600">
-          {isAdmin ? '🛡️ CLOSE' : '🛡️ ADMIN'}
+      {/* FLOATING ADMIN TRIGGER */}
+      <div className="fixed bottom-32 right-6 md:bottom-12 md:right-12 z-[80]">
+        <button onClick={() => { 
+          if(isAdmin) { setIsAdmin(false); return; }
+          const p = prompt("Enter Security Clearance:"); 
+          if(p===PASSWORD_ADMIN) setIsAdmin(true); 
+          else if(p !== null) alert("❌ UNAUTHORIZED ACCESS ATTEMPT");
+        }} className={`px-10 py-6 rounded-[2rem] shadow-2xl font-black text-[10px] tracking-widest uppercase transition-all border-b-[10px] flex items-center gap-3 ${isAdmin ? 'bg-red-600 border-red-800 text-white rotate-0' : 'bg-slate-900 border-slate-700 text-white hover:scale-110 active:scale-95'}`}>
+          {isAdmin ? 'TERMINATE SESSION' : '🛡️ SYSTEM OVERRIDE'}
         </button>
-        {isAdmin && (
-          <div className="absolute bottom-16 right-0 bg-white border border-gray-200 p-6 rounded-[2.5rem] shadow-2xl w-[320px] max-w-[90vw] space-y-4 animate-in slide-in-from-bottom-5">
-            <h4 className="text-[10px] font-black text-blue-600 uppercase italic border-b pb-2">Master Terminal Control</h4>
-            <div className="space-y-4">
-              <div className="p-3 bg-gray-50 rounded-xl">
-                <label className="text-[8px] font-black text-gray-400 uppercase">Add GT Subscription</label>
+      </div>
+
+      {/* ADMIN MASTER CONTROL PANEL */}
+      {isAdmin && (
+        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-2xl z-[200] flex items-center justify-center p-6 animate-in fade-in duration-300">
+          <div className="bg-white w-full max-w-2xl rounded-[4rem] p-12 space-y-10 shadow-2xl relative animate-in zoom-in-95 duration-500">
+            <button onClick={()=>setIsAdmin(false)} className="absolute top-12 right-12 font-black text-slate-300 hover:text-red-500 transition-colors uppercase text-[10px] tracking-widest">Close Terminal</button>
+            <h2 className="text-3xl font-black uppercase italic border-l-[12px] border-blue-600 pl-8 leading-none">Global Control<br/><span className="text-sm font-bold text-slate-400 not-italic tracking-[0.3em]">MASTER OVERRIDE</span></h2>
+            
+            <div className="space-y-8 overflow-y-auto max-h-[60vh] pr-6 custom-scrollbar">
+              {/* Enrollment */}
+              <div className="bg-slate-50 p-8 rounded-[3rem]">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-5">Hardware Deployment (GT Accounts)</p>
                 <form onSubmit={async (e) => {
-                  e.preventDefault(); const n = (e.target as any).n.value; const d = (e.target as any).d.value
-                  await supabase.from('gt_accounts').insert([{ name: n, expiry_date: d }]); fetchGlobalData(); (e.target as any).reset()
-                }} className="space-y-2 mt-2">
-                  <input name="n" placeholder="Account Name" className="w-full bg-white border p-2 rounded-lg text-[10px] font-bold outline-none" required />
-                  <input name="d" type="date" className="w-full bg-white border p-2 rounded-lg text-[10px] font-bold outline-none" required />
-                  <button className="w-full bg-blue-600 text-white text-[8px] py-2 rounded-lg font-black uppercase">Add Account</button>
+                  e.preventDefault(); 
+                  const target = e.target as any;
+                  const n = target.n.value; 
+                  const d = target.d.value;
+                  const { error } = await supabase.from('gt_accounts').insert([{ name: n, expiry_date: d }]); 
+                  if(!error) {
+                    fetchGlobalData(); target.reset(); alert("✅ ACCOUNT DEPLOYED TO GRID");
+                  }
+                }} className="flex flex-col gap-4">
+                  <input name="n" placeholder="Target Identifier / Account Name" className="w-full p-5 rounded-2xl text-xs font-black border-none shadow-sm focus:ring-4 ring-blue-500/10 outline-none uppercase" required />
+                  <div className="flex gap-4">
+                    <input name="d" type="date" className="flex-1 p-5 rounded-2xl text-xs font-black border-none shadow-sm outline-none" required />
+                    <button className="bg-blue-600 text-white px-10 rounded-2xl font-black text-[11px] uppercase shadow-lg shadow-blue-200 hover:bg-blue-700 transition-colors">DEPLOY</button>
+                  </div>
                 </form>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-[8px] font-black text-gray-400 uppercase">Rate IDR</label>
-                  <input type="number" className="w-full bg-gray-50 border p-2 rounded-lg text-xs font-black mt-1" value={currentRate} onChange={async (e)=>{ setCurrentRate(e.target.value); await supabase.from('global_settings').update({ rate_value: e.target.value }).eq('id', 'current_rate'); }} />
+
+              {/* Rates & Keys */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-slate-50 p-7 rounded-[2.5rem]">
+                  <label className="text-[9px] font-black uppercase text-slate-400 block mb-3 tracking-widest">Market Value / Unit</label>
+                  <div className="flex items-center bg-white rounded-2xl p-2 shadow-sm">
+                    <span className="pl-4 font-black text-slate-300">Rp</span>
+                    <input type="number" className="w-full bg-transparent p-4 rounded-xl text-2xl font-black border-none text-blue-600 focus:ring-0 outline-none font-mono" value={currentRate} onChange={(e)=>setCurrentRate(e.target.value)} onBlur={(e)=>saveGlobalSetting('rate_value', e.target.value)} />
+                  </div>
                 </div>
-                <div>
-                  <label className="text-[8px] font-black text-gray-400 uppercase">Duty Code</label>
-                  <input type="text" className="w-full bg-gray-50 border p-2 rounded-lg text-xs font-black mt-1 uppercase" value={dbDailyCode} onChange={async (e)=>{ setDbDailyCode(e.target.value.toUpperCase()); await supabase.from('global_settings').update({ daily_code: e.target.value.toUpperCase() }).eq('id', 'current_rate'); }} />
+                <div className="bg-slate-50 p-7 rounded-[2.5rem]">
+                  <label className="text-[9px] font-black uppercase text-slate-400 block mb-3 tracking-widest">Daily Access Key</label>
+                  <input type="text" className="w-full bg-white p-6 rounded-2xl text-2xl font-black border-none shadow-sm focus:ring-4 ring-blue-400/10 outline-none uppercase text-center tracking-widest font-mono" value={dbDailyCode} onChange={(e)=>setDbDailyCode(e.target.value.toUpperCase())} onBlur={(e)=>saveGlobalSetting('daily_code', e.target.value.toUpperCase())} />
                 </div>
               </div>
-              <div>
-                <label className="text-[8px] font-black text-gray-400 uppercase italic">Schedule URL (Img/PDF)</label>
-                <input type="text" className="w-full bg-gray-50 border p-2 rounded-lg text-[10px] font-bold mt-1" value={pdfUrl} placeholder="https://..." onChange={async (e)=>{ setPdfUrl(e.target.value); await supabase.from('global_settings').update({ schedule_pdf_url: e.target.value }).eq('id', 'current_rate'); }} />
+
+              {/* Map */}
+              <div className="bg-slate-50 p-8 rounded-[3rem]">
+                <label className="text-[9px] font-black uppercase italic text-slate-400 block mb-4 tracking-widest">Tactical Visualization Link (Image URL)</label>
+                <input type="text" className="w-full bg-white p-5 rounded-2xl text-[11px] font-bold border-none shadow-sm focus:ring-4 ring-blue-400/10 outline-none" value={pdfUrl} placeholder="Enter Direct Image URL (PNG/JPG/GIF)..." onChange={(e)=>setPdfUrl(e.target.value)} onBlur={(e)=>saveGlobalSetting('schedule_pdf_url', e.target.value)} />
               </div>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* 3. MOBILE NAV */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-xl border-t border-gray-100 p-4 flex justify-around items-center z-[90] rounded-t-[2.5rem] shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
-        {[
-          { id: 'gold', icon: '💰', label: 'LOGS' },
-          { id: 'absen', icon: '⚔️', label: 'DUTY' },
-          { id: 'piket', icon: '📅', label: 'MAP' }
-        ].map((t) => (
-          <button key={t.id} onClick={()=>setActiveTab(t.id)} className={`flex flex-col items-center gap-1 transition-all ${activeTab===t.id ? 'text-blue-600 scale-110' : 'text-gray-300'}`}>
-            <span className="text-xl">{t.icon}</span>
-            <span className="text-[8px] font-black tracking-widest">{t.label}</span>
+      {/* MOBILE NAV */}
+      <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-2xl border-t border-slate-100 p-8 flex justify-around items-center z-[100] rounded-t-[4rem] shadow-[0_-20px_50px_rgba(0,0,0,0.08)] md:hidden">
+        {[{id:'gold', i:'💰', l:'GOLD'}, {id:'absen', i:'🛡️', l:'DUTY'}, {id:'piket', i:'📡', l:'MAP'}].map(t => (
+          <button key={t.id} onClick={()=>setActiveTab(t.id)} className={`flex flex-col items-center gap-2 transition-all duration-500 ${activeTab===t.id ? 'scale-125 -translate-y-4' : 'opacity-20 grayscale'}`}>
+            <span className="text-4xl drop-shadow-lg">{t.i}</span>
+            <span className={`text-[10px] font-black tracking-widest ${activeTab===t.id ? 'text-blue-600' : 'text-slate-400'}`}>{t.l}</span>
           </button>
         ))}
       </nav>
-
-      <style jsx global>{`
-        @keyframes spin-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        .animate-spin-slow { animation: spin-slow 15s linear infinite; }
-        * { -webkit-tap-highlight-color: transparent; }
-      `}</style>
     </main>
   )
 }

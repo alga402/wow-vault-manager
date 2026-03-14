@@ -17,6 +17,7 @@ export default function Home() {
   const [currentRate, setCurrentRate] = useState('0')
   const [dbDailyCode, setDbDailyCode] = useState('123')
   const [pdfUrl, setPdfUrl] = useState('')
+  const [feePercent, setFeePercent] = useState('0') // State baru untuk potongan
 
   // --- ANALYTICS STATE ---
   const [personalTotalGold, setPersonalTotalGold] = useState(0)
@@ -31,6 +32,7 @@ export default function Home() {
   const [newRate, setNewRate] = useState('')
   const [newDailyCode, setNewDailyCode] = useState('')
   const [newPiketUrl, setNewPiketUrl] = useState('')
+  const [newFee, setNewFee] = useState('') // Input untuk admin ganti fee
 
   const PASSWORD_ADMIN = "12345"
 
@@ -44,7 +46,6 @@ export default function Home() {
 
       if (logsRes.data) {
         setLogs(logsRes.data)
-        // Filter agar statistik pribadi terbaca berdasarkan ID user Google yang login
         const myLogs = logsRes.data.filter(log => log.user_id === user?.id)
         const total = myLogs.reduce((acc, curr) => acc + (Number(curr.gold_amount) || 0), 0)
         setPersonalTotalGold(total)
@@ -59,6 +60,7 @@ export default function Home() {
         setDbDailyCode(settingsRes.data.daily_code || '123')
         setCurrentRate(settingsRes.data.rate_value || '0')
         setPdfUrl(settingsRes.data.schedule_pdf_url || '')
+        setFeePercent(settingsRes.data.fee_percent || '0') // Ambil data potongan
       }
     } catch (e) { console.error("SYNC ERROR") }
   }, [user?.id])
@@ -69,7 +71,7 @@ export default function Home() {
     setAttendanceData(att)
   }, [])
 
-  // 2. LIFECYCLE (Auth Google & Realtime)
+  // 2. LIFECYCLE
   useEffect(() => {
     const channel = supabase.channel('vault-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'gold_logs' }, () => fetchGlobalData())
@@ -91,7 +93,6 @@ export default function Home() {
     return () => { supabase.removeChannel(channel); clearInterval(timer); }
   }, [fetchGlobalData, fetchUserStats])
 
-  // LOGIN GOOGLE FUNCTION
   const handleGoogleLogin = async () => {
     setLoading(true)
     const { error } = await supabase.auth.signInWithOAuth({
@@ -102,9 +103,28 @@ export default function Home() {
     setLoading(false)
   }
 
-  // 3. ADMIN FUNCTIONS
+  // 3. ADMIN FUNCTIONS (WhatsApp Report Updated)
   const sendWhatsAppNotification = (farmer: string, amount: number, server: string) => {
-    const message = `*VAULT OS REPORT*%0A------------------%0A*Operator:* ${farmer.toUpperCase()}%0A*Amount:* ${amount.toLocaleString()}G%0A*Server:* ${server}%0A*Status:* TRANSMITTED%0A------------------%0A_Data telah tercatat di Ledger._`
+    const rate = parseInt(currentRate)
+    const kotor = (amount / 1000) * rate
+    const potongan = (parseInt(feePercent) / 100) * kotor
+    const bersih = kotor - potongan
+
+    const message = `*VAULT OS - STRUK PENCAIRAN*%0A` +
+      `------------------------------------------%0A` +
+      `*STATUS:* 🟢 SUDAH CAIR%0A` +
+      `*OPERATOR:* ${farmer.toUpperCase()}%0A` +
+      `*SERVER:* ${server}%0A` +
+      `------------------------------------------%0A` +
+      `*HASIL TANI:* ${amount.toLocaleString()} GOLD%0A` +
+      `*ESTIMASI KOTOR:* Rp ${kotor.toLocaleString('id-ID')}%0A` +
+      `*POTONGAN FEE (${feePercent}%):* Rp ${potongan.toLocaleString('id-ID')}%0A` +
+      `------------------------------------------%0A` +
+      `*TOTAL DITERIMA:* %0A` +
+      `👉 *Rp ${bersih.toLocaleString('id-ID')}*%0A` +
+      `------------------------------------------%0A` +
+      `_Terima kasih atas kerja kerasnya, Agen!_`
+    
     window.open(`https://wa.me/?text=${message}`, '_blank')
   }
 
@@ -128,6 +148,7 @@ export default function Home() {
       if(field === 'rate_value') setNewRate('');
       if(field === 'daily_code') setNewDailyCode('');
       if(field === 'schedule_pdf_url') setNewPiketUrl('');
+      if(field === 'fee_percent') setNewFee('');
     } catch (e) { alert("OVERRIDE FAILED") }
     finally { setLoading(false) }
   }
@@ -136,7 +157,6 @@ export default function Home() {
     e.preventDefault(); if (!gold || !serverName || loading) return;
     setLoading(true);
     try {
-      // Menggunakan nama dari Google Metadata (user_metadata.full_name)
       const farmerName = user?.user_metadata.full_name || user?.email?.split('@')[0]
       await supabase.from('gold_logs').insert([{ 
         farmer_name: farmerName, 
@@ -163,25 +183,20 @@ export default function Home() {
     } catch (e) { alert("OFFLINE"); } finally { setLoading(false); }
   }
 
-  // --- LOGIN SCREEN (GOOGLE ONLY) ---
+  // --- LOGIN SCREEN ---
   if (!user && appReady) {
     return (
-      <main className="min-h-screen bg-[#020617] flex items-center justify-center p-6">
-        <div className="w-full max-w-md bg-white rounded-[4rem] p-12 shadow-2xl space-y-10 text-center animate-in zoom-in duration-500">
+      <main className="min-h-screen bg-[#020617] flex items-center justify-center p-6 text-slate-900">
+        <div className="w-full max-w-md bg-white rounded-[4rem] p-12 shadow-2xl space-y-10 text-center">
           <div className="space-y-4">
             <div className="h-24 w-24 bg-slate-900 rounded-[2.5rem] mx-auto flex items-center justify-center text-white font-black text-5xl">V</div>
             <h2 className="text-3xl font-black uppercase italic tracking-tighter">Vault OS <span className="text-blue-600">Access</span></h2>
             <p className="text-[11px] font-bold text-slate-400 uppercase tracking-[0.3em]">Operator Authentication Required</p>
           </div>
-          <button 
-            onClick={handleGoogleLogin} 
-            disabled={loading}
-            className="w-full bg-white border-2 border-slate-100 hover:border-blue-500 py-6 rounded-[2rem] flex items-center justify-center gap-4 transition-all active:scale-95 group shadow-sm hover:shadow-xl"
-          >
+          <button onClick={handleGoogleLogin} disabled={loading} className="w-full bg-white border-2 border-slate-100 hover:border-blue-500 py-6 rounded-[2rem] flex items-center justify-center gap-4 transition-all active:scale-95 group shadow-sm">
             <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="h-6 w-6" alt="Google" />
             <span className="font-black text-[12px] uppercase tracking-wider text-slate-700">Continue with Google Account</span>
           </button>
-          <p className="text-[9px] font-bold text-slate-300 uppercase tracking-widest">Authorized Personnel Only</p>
         </div>
       </main>
     )
@@ -193,7 +208,7 @@ export default function Home() {
     <main className="min-h-screen bg-[#f8fafc] text-slate-900 pb-44">
       <div className="max-w-6xl mx-auto p-4 md:p-8 space-y-8">
         
-        {/* HEADER */}
+        {/* HEADER: DENGAN TOMBOL LOGOUT */}
         <header className="bg-white border border-slate-200 p-6 rounded-[2.5rem] shadow-sm flex flex-col md:flex-row justify-between items-center gap-6">
           <div className="flex items-center gap-5">
             <div className="h-16 w-16 bg-slate-900 rounded-[1.8rem] flex items-center justify-center text-white font-black text-3xl overflow-hidden">
@@ -202,16 +217,21 @@ export default function Home() {
             <div>
               <h1 className="text-2xl font-black uppercase italic tracking-tighter leading-none">Vault OS <span className="text-blue-600">14.7</span></h1>
               <p className="text-[10px] font-bold text-slate-400 mt-2 font-mono uppercase tracking-widest">
-                {user?.user_metadata.full_name || user?.email} • <span className="text-green-500">READY</span>
+                {user?.user_metadata.full_name || user?.email} • <span className="text-green-500">ONLINE</span>
               </p>
             </div>
           </div>
-          <button onClick={() => supabase.auth.signOut()} className="text-[10px] font-black uppercase text-red-500 px-4 hover:bg-red-50 py-3 rounded-xl transition-all">Log Out</button>
+          <button 
+            onClick={() => { if(confirm("Keluar dari sistem?")) supabase.auth.signOut() }} 
+            className="bg-red-50 text-red-600 font-black text-[10px] uppercase px-8 py-4 rounded-2xl hover:bg-red-600 hover:text-white transition-all shadow-sm"
+          >
+            Log Out System
+          </button>
         </header>
 
         {activeTab === 'gold' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 animate-in fade-in duration-700">
-            {/* LEFT: ANALYTICS & INPUT */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            {/* LEFT: ANALYTICS */}
             <div className="lg:col-span-4 space-y-6">
               <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-8 rounded-[3rem] text-white shadow-xl">
                 <p className="text-[10px] font-black uppercase tracking-[0.4em] mb-4 opacity-70">Revenue Intel</p>
@@ -231,16 +251,19 @@ export default function Home() {
                     <p className="text-[9px] font-black text-blue-400 mb-2 uppercase tracking-widest">Amount</p>
                     <input type="number" placeholder="0" className="w-full bg-transparent text-5xl font-black text-center outline-none" value={gold} onChange={e=>setGold(e.target.value)} />
                   </div>
-                  <button className="w-full font-black py-6 rounded-[2rem] text-[10px] uppercase bg-blue-600 text-white hover:bg-blue-700 shadow-lg transition-all">Execute Protocol</button>
+                  <button className="w-full font-black py-6 rounded-[2rem] text-[10px] uppercase bg-blue-600 text-white shadow-lg">Execute Protocol</button>
                 </form>
               </div>
             </div>
 
             {/* RIGHT: LEDGER */}
-            <div className="lg:col-span-8 bg-white rounded-[3.5rem] border border-slate-200 shadow-sm overflow-hidden">
+            <div className="lg:col-span-8 bg-white rounded-[3.5rem] border border-slate-200 overflow-hidden">
               <div className="p-8 border-b border-slate-50 bg-slate-50/30 flex justify-between items-center">
                  <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">Live Global Ledger</h3>
-                 <span className="text-[9px] font-black text-blue-500 uppercase tracking-tighter">Rate: Rp {currentRate} / 1k</span>
+                 <div className="text-right">
+                    <span className="block text-[9px] font-black text-blue-500 uppercase">Rate: Rp {currentRate} / 1k</span>
+                    <span className="block text-[9px] font-black text-red-500 uppercase">Potongan: {feePercent}%</span>
+                 </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
@@ -261,9 +284,9 @@ export default function Home() {
                         {isAdmin && (
                           <td className="p-6 flex gap-2 justify-center">
                             {i.status === 'Pending' ? (
-                              <button onClick={()=>updateLogStatus(i.id, 'Paid')} className="bg-green-600 text-white px-4 py-2 rounded-xl text-[9px] uppercase">Paid</button>
+                              <button onClick={()=>updateLogStatus(i.id, 'Paid')} className="bg-green-600 text-white px-4 py-2 rounded-xl text-[9px] uppercase">Verify</button>
                             ) : (
-                              <button onClick={()=>sendWhatsAppNotification(i.farmer_name, i.gold_amount, i.server_name)} className="bg-blue-500 text-white px-4 py-2 rounded-xl text-[9px] uppercase">WA</button>
+                              <button onClick={()=>sendWhatsAppNotification(i.farmer_name, i.gold_amount, i.server_name)} className="bg-blue-500 text-white px-4 py-2 rounded-xl text-[9px] uppercase">Send WA</button>
                             )}
                             <button onClick={()=>deleteLog(i.id)} className="text-red-400 px-2 font-black">×</button>
                           </td>
@@ -277,7 +300,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* TAB: ADMIN CORE */}
+        {/* TAB: ADMIN CORE UPDATED */}
         {activeTab === 'admin' && (
           <div className="max-w-md mx-auto space-y-6">
             {!isAdmin ? (
@@ -285,23 +308,29 @@ export default function Home() {
                 <p className="text-slate-300 font-black uppercase tracking-widest italic">Clearance Level 5 Required</p>
               </div>
             ) : (
-              <div className="space-y-6">
-                <div className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-sm">
-                  <h3 className="text-[10px] font-black text-blue-600 uppercase mb-4 pl-4 border-l-4 border-blue-600">Rate Configuration</h3>
-                  <div className="flex gap-2">
-                    <input type="number" placeholder={currentRate} className="flex-1 bg-slate-50 p-5 rounded-2xl text-sm font-black outline-none" value={newRate} onChange={e=>setNewRate(e.target.value)} />
-                    <button onClick={()=>updateGlobalSettings('rate_value', newRate)} className="bg-slate-900 text-white px-8 rounded-2xl font-black text-[10px] uppercase">Apply</button>
+              <div className="space-y-6 animate-in slide-in-from-bottom-4">
+                <div className="bg-white p-8 rounded-[3rem] border shadow-sm">
+                  <h3 className="text-[10px] font-black text-blue-600 uppercase mb-4 pl-4 border-l-4 border-blue-600">Rate & Fee Setup</h3>
+                  <div className="space-y-3">
+                    <div className="flex gap-2">
+                      <input type="number" placeholder={`Rate: ${currentRate}`} className="flex-1 bg-slate-50 p-5 rounded-2xl text-sm font-black outline-none" value={newRate} onChange={e=>setNewRate(e.target.value)} />
+                      <button onClick={()=>updateGlobalSettings('rate_value', newRate)} className="bg-slate-900 text-white px-8 rounded-2xl font-black text-[10px] uppercase">Set</button>
+                    </div>
+                    <div className="flex gap-2">
+                      <input type="number" placeholder={`Fee: ${feePercent}%`} className="flex-1 bg-slate-50 p-5 rounded-2xl text-sm font-black outline-none" value={newFee} onChange={e=>setNewFee(e.target.value)} />
+                      <button onClick={()=>updateGlobalSettings('fee_percent', newFee)} className="bg-red-600 text-white px-8 rounded-2xl font-black text-[10px] uppercase">Set</button>
+                    </div>
                   </div>
                 </div>
                 
-                <div className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-sm">
-                  <h3 className="text-[10px] font-black text-green-600 uppercase mb-4 pl-4 border-l-4 border-green-600">Duty Intel (Foto)</h3>
-                  <input type="text" placeholder="Link Foto Piket Baru..." className="w-full bg-slate-50 p-5 rounded-2xl text-[10px] font-bold outline-none mb-3" value={newPiketUrl} onChange={e=>setNewPiketUrl(e.target.value)} />
-                  <button onClick={()=>updateGlobalSettings('schedule_pdf_url', newPiketUrl)} className="w-full bg-green-600 text-white py-4 rounded-2xl font-black text-[10px] uppercase">Sync Intel</button>
+                <div className="bg-white p-8 rounded-[3rem] border shadow-sm">
+                  <h3 className="text-[10px] font-black text-green-600 uppercase mb-4 pl-4 border-l-4 border-green-600">Intel Media</h3>
+                  <input type="text" placeholder="Link Foto Piket..." className="w-full bg-slate-50 p-5 rounded-2xl text-[10px] font-bold outline-none mb-3" value={newPiketUrl} onChange={e=>setNewPiketUrl(e.target.value)} />
+                  <button onClick={()=>updateGlobalSettings('schedule_pdf_url', newPiketUrl)} className="w-full bg-green-600 text-white py-4 rounded-2xl font-black text-[10px] uppercase">Sync</button>
                 </div>
 
-                <div className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-sm">
-                  <h3 className="text-[10px] font-black text-orange-600 uppercase mb-4 pl-4 border-l-4 border-orange-600">System Key</h3>
+                <div className="bg-white p-8 rounded-[3rem] border shadow-sm">
+                  <h3 className="text-[10px] font-black text-orange-600 uppercase mb-4 pl-4 border-l-4 border-orange-600">Duty Key</h3>
                   <div className="flex gap-2">
                     <input type="text" placeholder={dbDailyCode} className="flex-1 bg-slate-50 p-5 rounded-2xl text-sm font-black outline-none" value={newDailyCode} onChange={e=>setNewDailyCode(e.target.value.toUpperCase())} />
                     <button onClick={()=>updateGlobalSettings('daily_code', newDailyCode)} className="bg-orange-600 text-white px-8 rounded-2xl font-black text-[10px] uppercase">Update</button>
@@ -312,12 +341,12 @@ export default function Home() {
           </div>
         )}
 
-        {/* TAB: DUTY & INTEL */}
+        {/* TAB LAINNYA TETAP SAMA */}
         {activeTab === 'absen' && <div className="flex justify-center py-10"><div className="bg-white p-14 rounded-[5rem] border shadow-2xl text-center w-full max-w-md"> <div className={`h-20 w-20 mx-auto rounded-3xl flex items-center justify-center text-4xl mb-10 ${attendanceData ? 'bg-red-50 text-red-500 animate-pulse' : 'bg-green-50 text-green-500'}`}> {attendanceData ? '🛑' : '⚡'} </div> <input type="password" placeholder="UNIT KEY" className="w-full bg-slate-50 p-6 rounded-[2rem] text-center text-2xl mb-8 outline-none border-4 border-transparent font-mono" value={absensiCode} onChange={e=>setAbsensiCode(e.target.value.toUpperCase())} /> <button onClick={handleAbsensi} className="w-full bg-slate-900 text-white font-black py-6 rounded-[2rem] text-[10px] tracking-widest uppercase">{attendanceData ? 'TERMINATE SHIFT' : 'INITIALIZE SHIFT'}</button> </div></div>}
-        {activeTab === 'piket' && <div className="bg-white rounded-[4rem] p-4 md:p-12 min-h-[400px] flex items-center justify-center shadow-inner overflow-hidden animate-in zoom-in duration-500"> {pdfUrl ? <img src={pdfUrl} className="rounded-[3rem] shadow-2xl border-8 border-white max-w-full" alt="Jadwal" /> : <p className="text-slate-200 font-black italic uppercase tracking-widest">Awaiting Uplink...</p>} </div>}
+        {activeTab === 'piket' && <div className="bg-white rounded-[4rem] p-4 md:p-12 min-h-[400px] flex items-center justify-center shadow-inner overflow-hidden"> {pdfUrl ? <img src={pdfUrl} className="rounded-[3rem] shadow-2xl border-8 border-white max-w-full" alt="Jadwal" /> : <p className="text-slate-200 font-black italic uppercase tracking-widest">Awaiting Uplink...</p>} </div>}
       </div>
 
-      {/* FLOATING ADMIN OVERRIDE */}
+      {/* FLOATING ADMIN */}
       <button onClick={() => { if(isAdmin) { setIsAdmin(false); return; } const p = prompt("SECURITY CLEARANCE:"); if(p === PASSWORD_ADMIN) setIsAdmin(true); }} className={`fixed bottom-36 right-8 z-[110] p-6 rounded-full font-black text-[10px] shadow-2xl transition-all ${isAdmin ? 'bg-red-600 text-white ring-8 ring-red-100 scale-110' : 'bg-slate-900 text-white opacity-40 hover:opacity-100'}`}> {isAdmin ? '🛡️ LOCK' : '🛡️'} </button>
 
       {/* NAVIGATION */}
